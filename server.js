@@ -1,8 +1,14 @@
 import express from "express";
 import { paymentMiddleware } from "x402-express";
 import dotenv from "dotenv";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 app.use(express.json());
@@ -11,6 +17,10 @@ const PORT = process.env.PORT || 4022;
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS;
 const NETWORK = process.env.NETWORK || "base-sepolia";
 const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilitator";
+const DATA_DIR = join(__dirname, "data");
+
+// Ensure data directory exists
+if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
 // ═══════════════════════════════════════════════════════════════
 // NWS Weather Oracle — ported from Python
@@ -49,7 +59,37 @@ function normalCdf(x, mu, sigma) {
   return 0.5 * (1 + erf((x - mu) / (sigma * Math.sqrt(2))));
 }
 
-// Error function approximation (Abramowitz and Stegun)
+function normalQuantile(p, mu, sigma) {
+  // Rational approximation of inverse normal CDF (Beasley-Springer-Moro)
+  const a = [0, -3.969683028665376e+01, 2.209460984245205e+02,
+    -2.759285104469687e+02, 1.383577518672690e+02,
+    -3.066479806614716e+01, 2.506628277459239e+00];
+  const b = [0, -5.447609879822406e+01, 1.615858368580409e+02,
+    -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01];
+  const c = [0, -7.784894002430293e-03, -3.223964580411365e-01,
+    -2.400758277161838e+00, -2.549732539343734e+00,
+    4.374664141464968e+00, 2.938163982698783e+00];
+  const d = [0, 7.784695709041462e-03, 3.224671290700398e-01,
+    2.445134137142996e+00, 3.754408661907416e+00];
+  const pLow = 0.02425, pHigh = 1 - pLow;
+  let q, r;
+  if (p < pLow) {
+    q = Math.sqrt(-2 * Math.log(p));
+    r = (((((c[1]*q+c[2])*q+c[3])*q+c[4])*q+c[5])*q+c[6]) /
+        ((((d[1]*q+d[2])*q+d[3])*q+d[4])*q+1);
+  } else if (p <= pHigh) {
+    q = p - 0.5;
+    r = q * q;
+    r = (((((a[1]*r+a[2])*r+a[3])*r+a[4])*r+a[5])*r+a[6])*q /
+        (((((b[1]*r+b[2])*r+b[3])*r+b[4])*r+b[5])*r+1);
+  } else {
+    q = Math.sqrt(-2 * Math.log(1 - p));
+    r = -(((((c[1]*q+c[2])*q+c[3])*q+c[4])*q+c[5])*q+c[6]) /
+         ((((d[1]*q+d[2])*q+d[3])*q+d[4])*q+1);
+  }
+  return mu + sigma * r;
+}
+
 function erf(x) {
   const sign = x >= 0 ? 1 : -1;
   x = Math.abs(x);
@@ -191,14 +231,237 @@ function priceBrackets(city, forecastHigh, currentHigh, hoursRemaining) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Free endpoints (discovery + health)
+// Confidence Intervals
 // ═══════════════════════════════════════════════════════════════
+
+function computeConfidenceIntervals(mu, sigma) {
+  return {
+    "50%": {
+      low: Math.round(normalQuantile(0.25, mu, sigma) * 10) / 10,
+      high: Math.round(normalQuantile(0.75, mu, sigma) * 10) / 10,
+    },
+    "80%": {
+      low: Math.round(normalQuantile(0.10, mu, sigma) * 10) / 10,
+      high: Math.round(normalQuantile(0.90, mu, sigma) * 10) / 10,
+    },
+    "95%": {
+      low: Math.round(normalQuantile(0.025, mu, sigma) * 10) / 10,
+      high: Math.round(normalQuantile(0.975, mu, sigma) * 10) / 10,
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Accuracy Tracking
+// ═══════════════════════════════════════════════════════════════
+
+const PREDICTIONS_FILE = join(DATA_DIR, "predictions.json");
+const ACCURACY_FILE = join(DATA_DIR, "accuracy.json");
+
+function loadJSON(filepath, fallback) {
+  try {
+    if (existsSync(filepath)) return JSON.parse(readFileSync(filepath, "utf8"));
+  } catch (e) { console.error(`Failed to load ${filepath}:`, e.message); }
+  return fallback;
+}
+
+function saveJSON(filepath, data) {
+  try { writeFileSync(filepath, JSON.stringify(data, null, 2)); } 
+  catch (e) { console.error(`Failed to save ${filepath}:`, e.message); }
+}
+
+function logPrediction(city, forecastHigh, mu, sigma, ci) {
+  const predictions = loadJSON(PREDICTIONS_FILE, []);
+  const today = new Date().toISOString().slice(0, 10);
+  // Don't log duplicate predictions for same city+date
+  const existing = predictions.find(p => p.city === city && p.date === today);
+  if (!existing) {
+    predictions.push({
+      city,
+      date: today,
+      timestamp: new Date().toISOString(),
+      nws_forecast_high: forecastHigh,
+      predicted_mean: mu,
+      predicted_sigma: sigma,
+      ci_80: ci["80%"],
+      ci_95: ci["95%"],
+      actual_high: null,
+      resolved: false,
+    });
+    // Keep last 90 days max
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 90);
+    const filtered = predictions.filter(p => new Date(p.date) >= cutoff);
+    saveJSON(PREDICTIONS_FILE, filtered);
+  }
+}
+
+async function resolvePredictions() {
+  const predictions = loadJSON(PREDICTIONS_FILE, []);
+  let changed = false;
+  for (const pred of predictions) {
+    if (pred.resolved || pred.actual_high != null) continue;
+    // Only resolve if the date is in the past
+    const predDate = new Date(pred.date + "T23:59:59Z");
+    if (predDate > new Date()) continue;
+    // Fetch actual high from NWS observations for that date
+    try {
+      const info = STATIONS[pred.city];
+      if (!info) continue;
+      const start = pred.date + "T00:00:00Z";
+      const end = pred.date + "T23:59:59Z";
+      const resp = await fetch(
+        `https://api.weather.gov/stations/${info.station}/observations?start=${start}&end=${end}&limit=50`,
+        { headers: NWS_HEADERS }
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const features = data.features || [];
+      let maxTemp = -Infinity;
+      for (const f of features) {
+        const t = f.properties?.temperature?.value;
+        if (t != null) {
+          const tf = f.properties.temperature.unitCode === "wmoUnit:degC" ? cToF(t) : t;
+          if (tf > maxTemp) maxTemp = tf;
+        }
+      }
+      if (maxTemp > -Infinity) {
+        pred.actual_high = Math.round(maxTemp * 10) / 10;
+        pred.resolved = true;
+        pred.error = Math.round((pred.actual_high - pred.predicted_mean) * 10) / 10;
+        pred.within_80 = pred.actual_high >= pred.ci_80.low && pred.actual_high <= pred.ci_80.high;
+        pred.within_95 = pred.actual_high >= pred.ci_95.low && pred.actual_high <= pred.ci_95.high;
+        changed = true;
+      }
+    } catch (e) {
+      console.error(`Resolution failed for ${pred.city} ${pred.date}:`, e.message);
+    }
+  }
+  if (changed) saveJSON(PREDICTIONS_FILE, predictions);
+  return predictions;
+}
+
+function computeAccuracyStats(predictions) {
+  const resolved = predictions.filter(p => p.resolved);
+  if (resolved.length === 0) {
+    return {
+      total_predictions: predictions.length,
+      resolved: 0,
+      pending: predictions.length,
+      message: "No predictions resolved yet. Check back after the first full day of tracking.",
+    };
+  }
+  const errors = resolved.map(p => p.error);
+  const absErrors = errors.map(Math.abs);
+  const mae = absErrors.reduce((a, b) => a + b, 0) / absErrors.length;
+  const rmse = Math.sqrt(errors.map(e => e * e).reduce((a, b) => a + b, 0) / errors.length);
+  const bias = errors.reduce((a, b) => a + b, 0) / errors.length;
+  const within80 = resolved.filter(p => p.within_80).length;
+  const within95 = resolved.filter(p => p.within_95).length;
+
+  // Per-city stats
+  const cityStats = {};
+  for (const city of Object.keys(STATIONS)) {
+    const cityResolved = resolved.filter(p => p.city === city);
+    if (cityResolved.length === 0) continue;
+    const ce = cityResolved.map(p => p.error);
+    const cae = ce.map(Math.abs);
+    cityStats[city] = {
+      predictions: cityResolved.length,
+      mae: Math.round(cae.reduce((a, b) => a + b, 0) / cae.length * 100) / 100,
+      bias: Math.round(ce.reduce((a, b) => a + b, 0) / ce.length * 100) / 100,
+      within_80_pct: Math.round(cityResolved.filter(p => p.within_80).length / cityResolved.length * 100),
+      within_95_pct: Math.round(cityResolved.filter(p => p.within_95).length / cityResolved.length * 100),
+    };
+  }
+
+  return {
+    total_predictions: predictions.length,
+    resolved: resolved.length,
+    pending: predictions.filter(p => !p.resolved).length,
+    overall: {
+      mae_f: Math.round(mae * 100) / 100,
+      rmse_f: Math.round(rmse * 100) / 100,
+      bias_f: Math.round(bias * 100) / 100,
+      within_80_pct: Math.round(within80 / resolved.length * 100),
+      within_95_pct: Math.round(within95 / resolved.length * 100),
+    },
+    by_city: cityStats,
+    tracking_since: resolved.reduce((min, p) => p.date < min ? p.date : min, resolved[0].date),
+    last_resolved: resolved.reduce((max, p) => p.date > max ? p.date : max, resolved[0].date),
+  };
+}
+
+// Try to resolve predictions every hour
+setInterval(async () => {
+  try { await resolvePredictions(); } catch (e) { console.error("Resolution tick failed:", e.message); }
+}, 60 * 60 * 1000);
+
+// Resolve on startup
+setTimeout(async () => {
+  try { await resolvePredictions(); } catch (e) { console.error("Initial resolution failed:", e.message); }
+}, 5000);
+
+// ═══════════════════════════════════════════════════════════════
+// Google A2A Agent Card (/.well-known/agent.json)
+// ═══════════════════════════════════════════════════════════════
+
+const AGENT_CARD = {
+  name: "Maximus Weather Oracle",
+  description: "NWS-calibrated temperature prediction API for 7 US cities. Returns probability distributions, confidence intervals, and accuracy tracking. Pay-per-request via x402 protocol (USDC on Base).",
+  url: "https://x402-weather-api.onrender.com",
+  version: "2.0.0",
+  author: {
+    name: "Maximus",
+    url: "https://twitter.com/Maximus_Claw",
+    blog: "https://becomingmaximus.substack.com",
+  },
+  protocol: "x402",
+  payment: {
+    network: NETWORK,
+    asset: "USDC",
+    wallet: WALLET_ADDRESS,
+    facilitator: FACILITATOR_URL,
+  },
+  capabilities: {
+    weather_prediction: {
+      description: "Gaussian-calibrated temperature high predictions with uncertainty quantification",
+      cities: Object.keys(STATIONS),
+      model: "Gaussian NWS-calibrated v2.0",
+      features: [
+        "probability bracket distribution",
+        "50/80/95% confidence intervals",
+        "real-time NWS observation fusion",
+        "historical accuracy tracking",
+        "intraday sigma narrowing",
+      ],
+    },
+  },
+  endpoints: [
+    { path: "/", method: "GET", description: "API info (free)", price: null },
+    { path: "/health", method: "GET", description: "Health check (free)", price: null },
+    { path: "/cities", method: "GET", description: "City station details (free)", price: null },
+    { path: "/accuracy", method: "GET", description: "Historical accuracy stats (free)", price: null },
+    { path: "/.well-known/agent.json", method: "GET", description: "Agent discovery card (free)", price: null },
+    { path: "/predict/:city", method: "GET", description: "Single city prediction", price: "$0.01 USDC" },
+    { path: "/predict/all", method: "GET", description: "All cities prediction", price: "$0.05 USDC" },
+  ],
+  tags: ["weather", "prediction", "x402", "agent-commerce", "oracle", "NWS"],
+};
+
+// ═══════════════════════════════════════════════════════════════
+// Free endpoints (discovery + health + accuracy)
+// ═══════════════════════════════════════════════════════════════
+
+app.get("/.well-known/agent.json", (req, res) => {
+  res.json(AGENT_CARD);
+});
 
 app.get("/", (req, res) => {
   res.json({
     name: "x402 Weather Prediction API",
-    version: "1.0.0",
-    description: "NWS-calibrated temperature predictions for 7 US cities. Powered by Gaussian pricing with historical error correction.",
+    version: "2.0.0",
+    description: "NWS-calibrated temperature predictions for 7 US cities with confidence intervals and accuracy tracking. Powered by Gaussian pricing with historical error correction.",
     author: "Maximus (@Maximus_Claw)",
     protocol: "x402",
     network: NETWORK,
@@ -207,14 +470,22 @@ app.get("/", (req, res) => {
       "GET /": "This info (free)",
       "GET /health": "API health check (free)",
       "GET /cities": "List supported cities with station details (free)",
-      "GET /predict/:city": "Calibrated temperature prediction + bracket probabilities ($0.01 per request via x402)",
-      "GET /predict/all": "All 7 cities predictions ($0.05 per request via x402)",
+      "GET /accuracy": "Historical prediction accuracy stats (free)",
+      "GET /.well-known/agent.json": "A2A agent discovery card (free)",
+      "GET /predict/:city": "Calibrated prediction + confidence intervals ($0.01 via x402)",
+      "GET /predict/all": "All 7 cities predictions ($0.05 via x402)",
     },
     pricing: {
       single_city: "$0.01 USDC per request",
       all_cities: "$0.05 USDC per request",
       payment: "x402 protocol — automatic HTTP 402 flow, no account needed",
     },
+    new_in_v2: [
+      "50/80/95% confidence intervals on every prediction",
+      "Historical accuracy tracking with MAE, RMSE, bias metrics",
+      "Per-city accuracy breakdown",
+      "Google A2A agent discovery card at /.well-known/agent.json",
+    ],
   });
 });
 
@@ -223,10 +494,13 @@ app.get("/health", async (req, res) => {
     const testResp = await fetch("https://api.weather.gov/stations/KNYC/observations/latest", {
       headers: NWS_HEADERS,
     });
+    const predictions = loadJSON(PREDICTIONS_FILE, []);
     res.json({
       status: testResp.ok ? "healthy" : "degraded",
       nws_api: testResp.ok ? "up" : "down",
       uptime: process.uptime(),
+      predictions_tracked: predictions.length,
+      predictions_resolved: predictions.filter(p => p.resolved).length,
       timestamp: new Date().toISOString(),
     });
   } catch (e) {
@@ -242,20 +516,28 @@ app.get("/cities", (req, res) => {
   res.json({ cities });
 });
 
+app.get("/accuracy", async (req, res) => {
+  try {
+    const predictions = await resolvePredictions();
+    const stats = computeAccuracyStats(predictions);
+    res.json({
+      timestamp: new Date().toISOString(),
+      model: "Gaussian NWS-calibrated v2.0",
+      ...stats,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // x402 Protected endpoints
 // ═══════════════════════════════════════════════════════════════
 
-// Apply x402 paywall to prediction endpoints
-// x402 route matching uses regex, not Express params.
-// /predict/* matches /predict/NYC, /predict/all, etc.
-// We handle /predict/all first as a separate route with higher price.
 const x402Routes = {};
-// Individual city predictions
 for (const city of Object.keys(STATIONS)) {
   x402Routes[`GET /predict/${city}`] = { price: "$0.01", network: NETWORK };
 }
-// All-cities endpoint
 x402Routes["GET /predict/all"] = { price: "$0.05", network: NETWORK };
 
 app.use(
@@ -274,12 +556,18 @@ app.get("/predict/all", async (req, res) => {
       const [obs, forecast] = await Promise.all([fetchObservation(city), fetchForecast(city)]);
       if (!forecast.high) return;
       const pricing = priceBrackets(city, forecast.high, obs?.temp_f ?? null, null);
+      const ci = computeConfidenceIntervals(pricing.mu, pricing.sigma);
+      // Log prediction for accuracy tracking
+      logPrediction(city, forecast.high, pricing.mu, pricing.sigma, ci);
       results[city] = {
         station: STATIONS[city].name,
         current_temp_f: obs?.temp_f ?? null,
         forecast_high_f: forecast.high,
         forecast_low_f: forecast.low,
-        model: pricing,
+        model: {
+          ...pricing,
+          confidence_intervals: ci,
+        },
         observation: obs ? {
           humidity: obs.humidity,
           wind_speed_kmh: obs.wind_speed_kmh,
@@ -291,7 +579,7 @@ app.get("/predict/all", async (req, res) => {
     await Promise.all(promises);
     res.json({
       timestamp: new Date().toISOString(),
-      model: "Gaussian NWS-calibrated v1.0",
+      model: "Gaussian NWS-calibrated v2.0",
       cities: results,
     });
   } catch (e) {
@@ -313,15 +601,21 @@ app.get("/predict/:city", async (req, res) => {
       return res.status(503).json({ error: `NWS forecast unavailable for ${city}` });
     }
     const pricing = priceBrackets(city, forecast.high, obs?.temp_f ?? null, null);
+    const ci = computeConfidenceIntervals(pricing.mu, pricing.sigma);
+    // Log prediction for accuracy tracking
+    logPrediction(city, forecast.high, pricing.mu, pricing.sigma, ci);
     res.json({
       timestamp: new Date().toISOString(),
       city,
       station: STATIONS[city].name,
-      model: "Gaussian NWS-calibrated v1.0",
+      model: "Gaussian NWS-calibrated v2.0",
       current_temp_f: obs?.temp_f ?? null,
       forecast_high_f: forecast.high,
       forecast_low_f: forecast.low,
-      prediction: pricing,
+      prediction: {
+        ...pricing,
+        confidence_intervals: ci,
+      },
       observation: obs ? {
         humidity: obs.humidity,
         wind_speed_kmh: obs.wind_speed_kmh,
@@ -339,7 +633,7 @@ app.get("/predict/:city", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 app.listen(PORT, () => {
-  console.log(`\n⚡ x402 Weather Prediction API running on port ${PORT}`);
+  console.log(`\n⚡ x402 Weather Prediction API v2.0 running on port ${PORT}`);
   console.log(`   Network: ${NETWORK}`);
   console.log(`   Wallet: ${WALLET_ADDRESS}`);
   console.log(`   Facilitator: ${FACILITATOR_URL}\n`);
@@ -347,6 +641,8 @@ app.listen(PORT, () => {
   console.log(`     GET http://localhost:${PORT}/`);
   console.log(`     GET http://localhost:${PORT}/health`);
   console.log(`     GET http://localhost:${PORT}/cities`);
+  console.log(`     GET http://localhost:${PORT}/accuracy`);
+  console.log(`     GET http://localhost:${PORT}/.well-known/agent.json`);
   console.log(`   Paid endpoints (x402):`);
   console.log(`     GET http://localhost:${PORT}/predict/:city  ($0.01)`);
   console.log(`     GET http://localhost:${PORT}/predict/all    ($0.05)\n`);
