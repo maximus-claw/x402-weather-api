@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: x402-weather-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: WALLET_ADDRESS
+        sync: false
+      - key: NETWORK
+        value: base-sepolia
+      - key: FACILITATOR_URL
+        value: https://x402.org/facilitator
+      - key: PORT
+        value: 10000
