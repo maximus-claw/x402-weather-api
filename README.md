@@ -77,6 +77,16 @@ const response = await withPayment(
 const prediction = await response.json();
 ```
 
+## Live API
+
+**Production URL:** https://x402-weather-api.onrender.com
+
+- `GET /` — API info (free)
+- `GET /health` — Health check (free)
+- `GET /cities` — Station details (free)
+- `GET /predict/:city` — $0.01 USDC (x402)
+- `GET /predict/all` — $0.05 USDC (x402)
+
 ## Running Locally
 
 ```bash
