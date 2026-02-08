@@ -1,19 +1,29 @@
 {
   "name": "x402-weather-api",
-  "version": "1.0.0",
-  "description": "",
-  "main": "server.js",
+  "version": "2.0.0",
+  "description": "NWS-calibrated weather prediction API with x402 v2 and Bazaar discovery",
+  "main": "server-v2.js",
   "scripts": {
+    "start": "node server-v2.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "x402",
+    "weather",
+    "oracle",
+    "bazaar",
+    "web3"
+  ],
+  "author": "Maximus",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@x402/core": "^2.3.0",
+    "@x402/evm": "^2.3.0",
+    "@x402/express": "^2.3.0",
+    "@x402/extensions": "^2.3.0",
     "dotenv": "^17.2.3",
     "ethers": "^6.16.0",
-    "express": "^5.2.1",
-    "x402-express": "^1.1.0"
+    "express": "^5.2.1"
   }
 }
