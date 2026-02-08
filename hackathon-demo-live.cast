@@ -1,0 +1,11 @@
+{"version":3,"term":{"cols":80,"rows":24},"timestamp":1770561652,"command":"bash record-hackathon-demo.sh","env":{"SHELL":"/bin/zsh"}}
+[0.008, "o", "🎬 x402 Weather Prediction API Demo\r\n======================================\r\n\r\n"]
+[2.112, "o", "📡 Step 1: Check API health\r\n$ curl -s https://x402-weather-api.onrender.com/health | jq .\r\n"]
+[1.314, "o", "\u001b[1;39m{\r\n  \u001b[0m\u001b[1;34m\"status\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"healthy\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0m\u001b[1;34m\"nws_api\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"up\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0m\u001b[1;34m\"uptime\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;39m837.809967465\u001b[0m\u001b[1;39m,\r\n  \u001b[0m\u001b[1;34m\"predictions_tracked\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;39m0\u001b[0m\u001b[1;39m,\r\n  \u001b[0m\u001b[1;34m\"predictions_resolved\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;39m0\u001b[0m\u001b[1;39m,\r\n  \u001b[0m\u001b[1;34m\"timestamp\"\u001b[0m\u001b[1;39m: \u001b[0m\u001b[0;32m\"2026-02-08T14:40:55.750Z\"\u001b[0m\u001b[1;39m\r\n\u001b[1;39m}\u001b[0m\r\n"]
+[0.000, "o", "\r\n"]
+[3.132, "o", "🌆 Step 2: List supported cities\r\n$ curl -s https://x402-weather-api.onrender.com/cities | jq \".cities | keys\"\r\n"]
+[1.242, "o", "\u001b[1;39m[\r\n  \u001b[0;32m\"Austin\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0;32m\"Chicago\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0;32m\"Denver\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0;32m\"Houston\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0;32m\"Miami\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0;32m\"NYC\"\u001b[0m\u001b[1;39m,\r\n  \u001b[0;32m\"Philadelphia\"\u001b[0m\u001b[1;39m\r\n\u001b[1;39m]\u001b[0m\r\n"]
+[0.000, "o", "\r\n"]
+[3.139, "o", "📊 Step 3: Check prediction accuracy\r\n$ curl -s https://x402-weather-api.onrender.com/accuracy | jq \"{overall_mae, total_predictions, cities: (.per_city | keys)}\"\r\n"]
+[1.260, "o", "jq: error (at <stdin>:0): null (null) has no keys\r\n"]
+[0.001, "x", "5"]
